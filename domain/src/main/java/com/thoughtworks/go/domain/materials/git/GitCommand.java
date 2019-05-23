@@ -44,6 +44,7 @@ import static com.thoughtworks.go.util.DateUtils.formatRFC822;
 import static com.thoughtworks.go.util.ExceptionUtils.bomb;
 import static com.thoughtworks.go.util.UrlUtil.*;
 import static com.thoughtworks.go.util.command.ProcessOutputStreamConsumer.inMemoryConsumer;
+import static org.apache.commons.lang3.StringUtils.firstNonBlank;
 
 public class GitCommand extends SCMCommand {
     private static final File TEMP_DIR = new File("data/tmp-scripts");
@@ -68,20 +69,23 @@ public class GitCommand extends SCMCommand {
     private final String branch;
     private final boolean isSubmodule;
 
-    public GitCommand(String materialFingerprint, File workingDir, String branch, boolean isSubmodule, List<SecretString> secrets) {
+    private final String sshPrivateKey;
+    private final String sshPasshprase;
+
+    public GitCommand(String materialFingerprint, File workingDir, String branch, boolean isSubmodule, List<SecretString> secrets, String sshPrivateKey, String sshPasshprase) {
         super(materialFingerprint);
         this.workingDir = workingDir;
         this.secrets = secrets != null ? secrets : new ArrayList<>();
         this.branch = StringUtils.isBlank(branch) ? GitMaterialConfig.DEFAULT_BRANCH : branch;
         this.isSubmodule = isSubmodule;
+        this.sshPrivateKey = sshPrivateKey;
+        this.sshPasshprase = sshPasshprase;
     }
 
     public int cloneWithNoCheckout(ConsoleOutputStreamConsumer outputStreamConsumer, String url) {
         CommandLine gitClone = cloneCommand().withArg("--no-checkout");
 
-        gitClone.withArg(new UrlArgument(url)).withArg(workingDir.getAbsolutePath());
-
-        return run(gitClone, outputStreamConsumer);
+        return doClone(gitClone, outputStreamConsumer, url);
     }
 
     public int clone(ConsoleOutputStreamConsumer outputStreamConsumer, String url) {
@@ -97,6 +101,10 @@ public class GitCommand extends SCMCommand {
             gitClone.withArg(String.format("--depth=%s", depth));
         }
 
+        return doClone(gitClone, outputStreamConsumer, url);
+    }
+
+    private int doClone(CommandLine gitClone, ConsoleOutputStreamConsumer outputStreamConsumer, String url) {
         String urlWithoutCredentials = urlWithoutCredentials(url);
         String username = getUsername(url);
         String password = getPassword(url);
@@ -326,20 +334,26 @@ public class GitCommand extends SCMCommand {
     }
 
     public void checkConnection(UrlArgument repoUrl, String branch) {
+        checkConnection(repoUrl, branch, null, null);
+    }
+
+    public void checkConnection(UrlArgument repoUrl, String branch, String username, String password) {
         String urlWithoutCredentials = urlWithoutCredentials(repoUrl.forCommandLine());
-        String username = getUsername(repoUrl.forCommandLine());
-        String pass = getPassword(repoUrl.forCommandLine());
+        username = firstNonBlank(getUsername(repoUrl.forCommandLine()), username);
+        password = firstNonBlank(getPassword(repoUrl.forCommandLine()), password);
 
         CommandLine commandLine = git().withArgs("ls-remote").withArg(urlWithoutCredentials).withArg("refs/heads/" + branch);
 
-        configuringPassPrompts(commandLine, username, pass, () -> {
+        configuringPassPrompts(commandLine, username, password, () -> {
             ConsoleResult result = commandLine.runOrBomb(new NamedProcessTag(urlWithoutCredentials));
             if (!hasOnlyOneMatchingBranch(result)) {
                 throw new CommandLineException(String.format("The branch %s could not be found.", branch));
             }
             return null;
         });
+
     }
+
 
     private static boolean hasOnlyOneMatchingBranch(ConsoleResult branchList) {
         return (branchList.output().size() == 1);
@@ -552,27 +566,67 @@ public class GitCommand extends SCMCommand {
         File usernameFile = null;
         File passwordFile = null;
         File askPassScript = null;
+
+        File sshPrivateKeyFile = null;
+        File passphraseFile = null;
+        File sshScript = null;
         try {
             usernameFile = createTempFile("user-", ".txt");
             passwordFile = createTempFile("pass-", ".txt");
             askPassScript = createTempFile("askpass", ".sh");
 
-            FileUtils.writeStringToFile(usernameFile, username + "\n", StandardCharsets.UTF_8);
-            FileUtils.writeStringToFile(passwordFile, password + "\n", StandardCharsets.UTF_8);
-            FileUtils.writeStringToFile(askPassScript, SCRIPT_GENERATOR.askpassUnixScript(commandLine, usernameFile, passwordFile), StandardCharsets.UTF_8);
+            setupAskPassScript(commandLine, username, password, usernameFile, passwordFile, askPassScript);
 
-            askPassScript.setExecutable(true, true);
-
-            // enable git debugging
-            // commandLine.withEnv("GIT_TRACE", "/tmp/git-trace.log");
             commandLine.withEnv("GIT_ASKPASS", askPassScript.getAbsolutePath());
             commandLine.withEnv("SSH_ASKPASS", askPassScript.getAbsolutePath());
+
+            sshPrivateKeyFile = createTempFile("private-key-", ".txt");
+            passphraseFile = createTempFile("passphrase-", ".txt");
+            sshScript = createTempFile("ssh-", ".sh");
+
+            setupSshScript(commandLine, passphraseFile, sshPrivateKeyFile, sshScript);
+
+            commandLine.withEnv("GIT_SSH", sshScript.getAbsolutePath());
+            commandLine.withEnv("GIT_SSH_VARIANT", "ssh");
+
+            // supply a dummy value for DISPLAY if not already present
+            // or else ssh will not invoke `SSH_ASKPASS`
+            if (!commandLine.env().containsKey("DISPLAY") && !System.getenv().containsKey("DISPLAY")) {
+                commandLine.withEnv("DISPLAY", ":");
+            }
+
+            enableGitTrace(commandLine);
+
             return operation.get();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         } finally {
-            deleteFilesWithWarning(askPassScript, usernameFile, passwordFile);
+            deleteFilesWithWarning(usernameFile, passwordFile, askPassScript, passphraseFile, sshPrivateKeyFile, sshScript);
         }
+
+
+    }
+
+    private void setupSshScript(CommandLine commandLine, File passphraseFile, File sshPrivateKeyFile, File sshScript) throws IOException {
+        FileUtils.writeStringToFile(sshPrivateKeyFile, StringUtils.stripToEmpty(sshPrivateKey) + "\n", StandardCharsets.UTF_8);
+        FileUtils.writeStringToFile(passphraseFile, StringUtils.stripToEmpty(sshPasshprase) + "\n", StandardCharsets.UTF_8);
+        FileUtils.writeStringToFile(sshScript, SCRIPT_GENERATOR.sshUnixScript(commandLine, sshPrivateKeyFile, passphraseFile), StandardCharsets.UTF_8);
+
+        sshScript.setExecutable(true, true);
+    }
+
+    private void setupAskPassScript(CommandLine commandLine, String username, String password, File usernameFile, File passwordFile, File askPassScript) throws IOException {
+        FileUtils.writeStringToFile(usernameFile, StringUtils.stripToEmpty(username) + "\n", StandardCharsets.UTF_8);
+        FileUtils.writeStringToFile(passwordFile, StringUtils.stripToEmpty(password) + "\n", StandardCharsets.UTF_8);
+        FileUtils.writeStringToFile(askPassScript, SCRIPT_GENERATOR.askpassUnixScript(commandLine, usernameFile, passwordFile), StandardCharsets.UTF_8);
+
+        askPassScript.setExecutable(true, true);
+    }
+
+    private void enableGitTrace(CommandLine commandLine) {
+        // enable git debugging
+        commandLine.withEnv("GIT_SSH_TRACE", "/tmp/git-ssh-trace.log");
+        commandLine.withEnv("GIT_TRACE", "/tmp/git-trace.log");
     }
 
     private File createTempFile(String prefix, String extension) throws IOException {

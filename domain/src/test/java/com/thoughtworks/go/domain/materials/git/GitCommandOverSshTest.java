@@ -17,6 +17,7 @@
 package com.thoughtworks.go.domain.materials.git;
 
 import com.thoughtworks.go.util.command.CommandLine;
+import com.thoughtworks.go.util.command.UrlArgument;
 import org.apache.commons.io.FileUtils;
 import org.apache.sshd.common.util.security.SecurityUtils;
 import org.apache.sshd.server.SshServer;
@@ -24,6 +25,7 @@ import org.apache.sshd.server.auth.pubkey.KeySetPublickeyAuthenticator;
 import org.apache.sshd.server.keyprovider.AbstractGeneratorHostKeyProvider;
 import org.apache.sshd.server.session.ServerSession;
 import org.apache.sshd.server.shell.ProcessShellFactory;
+import org.assertj.core.api.Assertions;
 import org.bouncycastle.openssl.PEMEncryptor;
 import org.bouncycastle.openssl.jcajce.JcaMiscPEMGenerator;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
@@ -57,7 +59,7 @@ public class GitCommandOverSshTest {
     private File hostKeyFile;
     private KeyPair keyPair1;
     private KeyPair keyPair2;
-    private String encryptedPrivateKey2;
+    private String sshKeyWithPassphrase;
     private File gitRepositoriesRoot;
 
     @BeforeEach
@@ -69,9 +71,9 @@ public class GitCommandOverSshTest {
         FileUtils.copyDirectory(basedir, new File(gitRepositoriesRoot, GIT_REMOTE_PATH));
         hostKeyFile = temporaryFolder.newFile();
 
-        keyPair1 = keyPairWithPassphrase();
-        keyPair2 = keyPairWithPassphrase();
-        encryptedPrivateKey2 = encrypt(keyPair2.getPrivate(), sshKeyPassphrase);
+        keyPair1 = keyPairWithoutPassphrase();
+        keyPair2 = keyPairWithoutPassphrase();
+        sshKeyWithPassphrase = encrypt(keyPair2.getPrivate(), sshKeyPassphrase);
 
         sshd = SshServer.setUpDefaultServer();
         sshd.setKeyPairProvider(hostKeyProvider(hostKeyFile));
@@ -103,7 +105,7 @@ public class GitCommandOverSshTest {
         return out.toString();
     }
 
-    private static KeyPair keyPairWithPassphrase() throws GeneralSecurityException {
+    private static KeyPair keyPairWithoutPassphrase() throws GeneralSecurityException {
         KeyPairGenerator keyPairGenerator = SecurityUtils.getKeyPairGenerator("RSA");
         keyPairGenerator.initialize(1024);
         return keyPairGenerator.generateKeyPair();
@@ -127,66 +129,53 @@ public class GitCommandOverSshTest {
 
     @Test
     void shouldAllowSshConnectionUsingSSHKeyWithNoPassphrase() throws Exception {
-        GitCommand gitCommand = new GitCommand(null, null, null, false, null);
+        GitCommand gitCommand = new GitCommand(null, null, null, false, null, toPem(keyPair1.getPrivate()), null);
 
-//
-//
-//
-//        GitConfig config = GitConfig.newDebugBuilder().url(sshUrl())
-//                .sshKey(toPem(keyPair1.getPrivate()))
-//                .branch("master")
-//                .build();
-//
-//        GitCommandResult result = GitProcessExecutor.create(GitCommandId.Check_Connection, config)
-//                .execute();
-//        assertThat(result.returnValue()).isEqualTo(0);
+        Assertions.assertThatCode(() -> {
+            gitCommand.checkConnection(new UrlArgument(sshUrl()), "master");
+        }).doesNotThrowAnyException();
     }
 
     @Test
     void shouldAllowSshConnectionUsingSSHPassword() {
-//        GitConfig config = GitConfig.newDebugBuilder().url(sshUrl())
-//                .password(LOGIN_PASSWORD)
-//                .build();
-//
-//        GitCommandResult result = GitProcessExecutor.create(GitCommandId.Check_Connection, config)
-//                .execute();
-//        assertThat(result.returnValue()).isEqualTo(0);
+        GitCommand gitCommand = new GitCommand(null, null, null, false, null, null, null);
+
+        Assertions.assertThatCode(() -> {
+            gitCommand.checkConnection(new UrlArgument(sshUrl()), "master", LOGIN_USER, LOGIN_PASSWORD);
+        }).doesNotThrowAnyException();
     }
 
     @Test
     void shouldFailIfSshConnectionFailsBecauseOfMissingSshKey() {
-//        GitConfig config = GitConfig.newDebugBuilder().url(sshUrl()).build();
-//
-//        GitProcessExecutor git = GitProcessExecutor.create(GitCommandId.Check_Connection, config);
-//
-//        assertThatExceptionOfType(GitCommandExecutionException.class)
-//                .isThrownBy(git::execute)
-//                .withMessageContaining("org.apache.sshd.common.SshException: No more authentication methods available")
-//                .withMessageContaining("fatal");
+        GitCommand gitCommand = new GitCommand(null, null, null, false, null, null, null);
+
+        Assertions.assertThatCode(() -> {
+            gitCommand.checkConnection(new UrlArgument(sshUrl()), "master");
+        })
+                .hasMessageContaining("fatal")
+                .hasMessageContaining("/git/my-project")
+                .hasMessageContaining("Please make sure you have the correct access rights");
     }
 
     @Test
     void shouldFailIfSshConnectionFailsBecauseOfBadRepositoryPathInUrl() {
-//        GitConfig config = GitConfig.newDebugBuilder().url(badSshUrl()).password(LOGIN_PASSWORD).build();
-//
-//        GitProcessExecutor git = GitProcessExecutor.create(GitCommandId.Check_Connection, config);
-//
-//        assertThatExceptionOfType(GitCommandExecutionException.class)
-//                .isThrownBy(git::execute)
-//                .withMessageContaining("fatal")
-//                .withMessageContaining("/git/bad-url");
+        GitCommand gitCommand = new GitCommand(null, null, null, false, null, null, null);
+
+        Assertions.assertThatCode(() -> {
+            gitCommand.checkConnection(new UrlArgument(badSshUrl()), "master", LOGIN_USER, LOGIN_PASSWORD);
+        })
+                .hasMessageContaining("fatal")
+                .hasMessageContaining("git/bad-url")
+                .hasMessageContaining("Please make sure you have the correct access rights");
     }
 
     @Test
     void shouldAllowSshConnectionForSshKeyWithPassphrase() {
-//        GitConfig config = GitConfig.newDebugBuilder().url(sshUrl())
-//                .sshKey(encryptedPrivateKey2)
-//                .sshKeyPassphrase(sshKeyPassphrase)
-//                .build();
-//
-//        GitCommandResult result = GitProcessExecutor.create(GitCommandId.Check_Connection, config)
-//                .execute();
-//        assertThat(result.returnValue()).isEqualTo(0);
+        GitCommand gitCommand = new GitCommand(null, null, null, false, null, sshKeyWithPassphrase, sshKeyPassphrase);
+        Assertions.assertThatCode(() -> {
+            gitCommand.checkConnection(new UrlArgument(sshUrl()), "master");
+        })
+                .doesNotThrowAnyException();
     }
 
     private static class UserPublickeyAuthenticator extends KeySetPublickeyAuthenticator {

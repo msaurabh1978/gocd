@@ -63,6 +63,26 @@ public class ScriptGenerator {
 
     }
 
+    public String sshUnixScript(CommandLine commandLine, File sshPrivateKeyFile, File passphraseFile) {
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(1024);
+            try (PrintWriter printWriter = new PrintWriter(new OutputStreamWriter(baos, StandardCharsets.UTF_8))) {
+                printWriter.println("#!/bin/sh");
+                // ${SSH_ASKPASS} might be ignored if ${DISPLAY} is not set
+                printWriter.println("if [ -z \"${DISPLAY}\" ]; then");
+                printWriter.println("  DISPLAY=:123.456");
+                printWriter.println("  export DISPLAY");
+                printWriter.println("fi");
+                printWriter.println(String.format("ssh -vvv -i \"%s\" -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \"$@\" 2> /tmp/git-ssh-trace.log", sshPrivateKeyFile.getAbsolutePath()));
+            }
+            commandLine.withEnv("GO_PASSPHRASE_FILE", passphraseFile.getAbsolutePath());
+            commandLine.withEnv("GO_PRIVATE_KEY_FILE", sshPrivateKeyFile.getAbsolutePath());
+            return baos.toString("utf-8");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     /*
      * Escape all single quotes in filename, then surround filename in single quotes (to avoid interpolation)
      * Only useful use filename references in shell scripts.
@@ -86,4 +106,6 @@ public class ScriptGenerator {
         }
         return "\"" + filename + "\"";
     }
+
+
 }
